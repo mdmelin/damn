@@ -14,6 +14,10 @@ setup(
     ],
     install_requires=[
         "numpy",
+        "scipy",
+        "scikit-learn",
+        "tqdm",
+        "matplotlib"
     ],
     packages=find_packages(where="."),
     package_dir={"": "."},
