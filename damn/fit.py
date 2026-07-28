@@ -26,6 +26,24 @@ import numpy as np
 
 CLAMP = 8 # to prevent exploding gradients
 
+
+def _format_alpha(alpha, N, device):
+    """Normalize alpha to shape (1, N) for consistent per-target regularization."""
+    alpha_arr = np.asarray(alpha, dtype=np.float32)
+
+    if alpha_arr.ndim == 0:
+        alpha_arr = np.full((N,), float(alpha_arr), dtype=np.float32)
+    else:
+        alpha_arr = alpha_arr.reshape(-1)
+        if alpha_arr.size == 1:
+            alpha_arr = np.full((N,), float(alpha_arr.item()), dtype=np.float32)
+        elif alpha_arr.size != N:
+            raise ValueError(
+                f"alpha must be a scalar or length-N array (N={N}), got shape {np.shape(alpha)}"
+            )
+
+    return torch.as_tensor(alpha_arr.reshape(1, N), dtype=torch.float32, device=device)
+
 def fit_poisson_glm_best_alpha_per_target(
     X,
     Y,
@@ -296,16 +314,14 @@ def fit_poisson_glm_lbfgs(
     X_train = torch.as_tensor(X_train, dtype=torch.float32).to(device)
     Y_train = torch.as_tensor(Y_train, dtype=torch.float32).to(device)
 
-    # add a dimension and transpose alpha so it can be broadcasted to W (for alpha-per-target fitting)
-    alpha = np.expand_dims(alpha, axis=0)
-    alpha = torch.tensor(alpha, dtype=torch.float32).to(device)
+    N = Y_train.shape[1]
+    alpha = _format_alpha(alpha, N, device)
 
     if has_val:
         X_val = torch.as_tensor(X_val, dtype=torch.float32).to(device)
         Y_val = torch.as_tensor(Y_val, dtype=torch.float32).to(device)
 
     T_train, p = X_train.shape
-    N = Y_train.shape[1]
 
     if W_init is None and b_init is None:
         mean_rates = torch.mean(Y_train, dim=0)
@@ -487,16 +503,14 @@ def fit_poisson_glm_adam(
     X_train_cpu = torch.from_numpy(X_train).float().pin_memory()
     Y_train_cpu = torch.from_numpy(Y_train).float().pin_memory()
 
-    # add a dimension and transpose alpha so it can be broadcasted to W (for alpha-per-target fitting)
-    alpha = np.expand_dims(alpha, axis=0)
-    alpha = torch.tensor(alpha, dtype=torch.float32).to(device)
+    N = Y_train_cpu.shape[1]
+    alpha = _format_alpha(alpha, N, device)
 
     if has_val:
         X_val_cpu = torch.as_tensor(X_val, dtype=torch.float32).pin_memory()
         Y_val_cpu = torch.as_tensor(Y_val, dtype=torch.float32).pin_memory()
 
     T_train, p = X_train_cpu.shape
-    N = Y_train_cpu.shape[1]
 
     if W_init is None and b_init is None:
         mean_rates = torch.mean(Y_train_cpu, dim=0)
@@ -652,8 +666,14 @@ def _prepare_data(X, Y, val_fraction, val_inds=None, seed=None):
         raise ValueError("Only one of val_inds or val_fraction should be provided.")
 
     if val_inds is not None:
-        X_train = X[~val_inds]
-        Y_train = Y[~val_inds]
+        # assert not a boolean mask
+        if isinstance(val_inds, np.ndarray) and val_inds.dtype == bool:
+            raise ValueError("val_inds should be an array of indices, not a boolean mask.")
+        assert np.all((val_inds >= 0) & (val_inds < X.shape[0])), "val_inds must be valid indices for X"
+        mask = np.ones(X.shape[0], dtype=bool)
+        mask[val_inds] = False
+        X_train = X[mask]
+        Y_train = Y[mask]
         X_val = X[val_inds]
         Y_val = Y[val_inds]
         has_val = True
