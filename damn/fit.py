@@ -311,15 +311,15 @@ def fit_poisson_glm_lbfgs(
         X, Y, val_fraction, val_inds, seed
     )
 
-    X_train = torch.as_tensor(X_train, dtype=torch.float32).to(device)
-    Y_train = torch.as_tensor(Y_train, dtype=torch.float32).to(device)
+    X_train = torch.from_numpy(X_train).to(device=device, dtype=torch.float32)
+    Y_train = torch.from_numpy(Y_train).to(device=device, dtype=torch.float32)
 
     N = Y_train.shape[1]
     alpha = _format_alpha(alpha, N, device)
 
     if has_val:
-        X_val = torch.as_tensor(X_val, dtype=torch.float32).to(device)
-        Y_val = torch.as_tensor(Y_val, dtype=torch.float32).to(device)
+        X_val = torch.from_numpy(X_val).to(device=device, dtype=torch.float32)
+        Y_val = torch.from_numpy(Y_val).to(device=device, dtype=torch.float32)
 
     T_train, p = X_train.shape
 
