@@ -42,7 +42,7 @@ def _format_alpha(alpha, N, device):
                 f"alpha must be a scalar or length-N array (N={N}), got shape {np.shape(alpha)}"
             )
 
-    return torch.as_tensor(alpha_arr.reshape(1, N), dtype=torch.float32, device=device)
+    return torch.from_numpy(alpha_arr.reshape(1, N)).to(device=device, dtype=torch.float32)
 
 def fit_poisson_glm_best_alpha_per_target(
     X,
@@ -331,8 +331,8 @@ def fit_poisson_glm_lbfgs(
         if len(bad_cols) > 0:
             # if we removed bad columns, we need to remove those columns from W_init as well for the warm start
             W_init = np.delete(W_init, bad_cols, axis=0)
-        W = torch.as_tensor(W_init, dtype=torch.float32, device=device)
-        b = torch.as_tensor(b_init, dtype=torch.float32, device=device)
+        W = torch.from_numpy(W_init).to(device=device, dtype=torch.float32)
+        b = torch.from_numpy(b_init).to(device=device, dtype=torch.float32)
         # add small noise safely
         with torch.no_grad():
             W += .0001 * torch.randn_like(W)
@@ -507,8 +507,8 @@ def fit_poisson_glm_adam(
     alpha = _format_alpha(alpha, N, device)
 
     if has_val:
-        X_val_cpu = torch.as_tensor(X_val, dtype=torch.float32).pin_memory()
-        Y_val_cpu = torch.as_tensor(Y_val, dtype=torch.float32).pin_memory()
+        X_val_cpu = torch.from_numpy(X_val).float().pin_memory()
+        Y_val_cpu = torch.from_numpy(Y_val).float().pin_memory()
 
     T_train, p = X_train_cpu.shape
 
@@ -517,8 +517,8 @@ def fit_poisson_glm_adam(
         W, b = _initialize_params(p, N, mean_rates, device)
     else:
         # warm start from previous solution
-        W = torch.as_tensor(W_init, dtype=torch.float32, device=device)
-        b = torch.as_tensor(b_init, dtype=torch.float32, device=device)
+        W = torch.from_numpy(W_init).float().to(device)
+        b = torch.from_numpy(b_init).float().to(device)
         # add small noise safely
         with torch.no_grad():
             W += .01 * torch.randn_like(W)
