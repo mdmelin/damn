@@ -728,7 +728,7 @@ def _poisson_loss(W, b, X, Y, alpha=None):
         return data_loss
 
 def _poisson_loss_per_target(W, b, X, Y, alpha=None):
-    eta = X @ W + b                  # (T, N)
+    eta = torch.clamp(X @ W + b, min=-CLAMP, max=CLAMP)  # (T, N)
     exp_eta = torch.exp(eta)         # (T, N)
     data_loss = torch.sum(exp_eta - Y * eta, dim=0)
     if alpha is None:

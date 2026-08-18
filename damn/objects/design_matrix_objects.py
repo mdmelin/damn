@@ -281,6 +281,28 @@ class DesignMatrix:
             if reg.tags & tags:
                 reg._zeroed = zeroed
     
+    def set_zeroed_regressors(self, regnames, zeroed):
+        """
+        Mark all regressors with the given name(s) to be zeroed out.
+
+        Parameters
+        ----------
+        regnames : str or list[str]
+            Name(s) identifying which regressors to zero out.
+        zeroed : bool
+            Whether to turn zeroing on or off.
+        """
+        if isinstance(regnames, str):
+            regnames = [regnames]
+        regnames = set(regnames)
+
+        for reg in self.regressors.values():
+            if reg.name in regnames:
+                reg._zeroed = zeroed
+        for reg in self.hidden_regressors.values():
+            if reg.name in regnames:
+                reg._zeroed = zeroed
+    
     def remove_regressor_with_tag(self, tags):
         if isinstance(tags, str):
             tags = [tags]
