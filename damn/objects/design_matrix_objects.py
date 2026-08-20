@@ -7,11 +7,12 @@ import copy
 
 class DesignMatrix:
     def __init__(self, master_alignment_times,
-                 master_pre_s, master_post_s, binwidth_s):
+                 master_pre_s, master_post_s, binwidth_s, z_score_all=False):
         self.master_alignment_times = master_alignment_times
         self.master_pre_s = master_pre_s
         self.master_post_s = master_post_s
         self.binwidth_s = binwidth_s
+        self.z_score_all = z_score_all
         self.regressors = {}
         self.hidden_regressors = {}
 
@@ -147,24 +148,20 @@ class DesignMatrix:
         else:
             col_idx = list(col_idx)
 
-        out_cols = []
-        ranges = self._regressor_col_ranges
-
-        for c in col_idx:
-            for name, (start, end) in ranges.items():
-                if start <= c < end:
-                    reg = self.regressors[name]
-                    out_cols.append(reg[row_idx, c - start])
-                    break
-            else:
-                raise IndexError(f"Column {c} out of range")
-
-        return np.column_stack(out_cols)
+        return self.X[row_idx, col_idx]
     
     @property
     def X(self):
         # return a safe copy of the full design matrix
-        return np.hstack([reg.X for reg in self.regressors.values()])
+        X = np.hstack([reg.X for reg in self.regressors.values()])
+        if not self.z_score_all:
+            return X
+
+        means = np.nanmean(X, axis=0)
+        stds = np.nanstd(X, axis=0)
+        # Keep constant columns finite: their centered values are all zero.
+        stds[stds == 0] = 1
+        return (X - means) / stds
     
     def shuffle_all(self):
         for reg in self.regressors.values():
