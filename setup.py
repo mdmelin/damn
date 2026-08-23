@@ -7,9 +7,10 @@ setup(
     description="DAMN (Design A Matrix Now) - tools for building and fitting design matrices and GLMS.",
     long_description=open('README.md').read(),
     long_description_content_type="text/markdown",
-    python_requires=">=3.9",
+    python_requires=">=3.11",
     classifiers=[
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.11",
         "Operating System :: OS Independent",
     ],
     install_requires=[
