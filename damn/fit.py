@@ -24,7 +24,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-CLAMP = 8 # to prevent exploding gradients
+CLAMP = 8 # upper clamp on eta to prevent exploding rates/gradients
 
 
 def _format_alpha(alpha, N, device):
@@ -707,7 +707,7 @@ def _initialize_params(p, N, mean_rates, device):
     return W, b
 
 def _poisson_loss(W, b, X, Y, alpha=None):
-    eta = torch.clamp(X @ W + b, max=CLAMP, min=-CLAMP)
+    eta = torch.clamp(X @ W + b, max=CLAMP)
     #exp_eta = torch.exp(eta)
     #eta = X @ W + b
     # apply alpha per target
@@ -728,7 +728,7 @@ def _poisson_loss(W, b, X, Y, alpha=None):
         return data_loss
 
 def _poisson_loss_per_target(W, b, X, Y, alpha=None):
-    eta = torch.clamp(X @ W + b, min=-CLAMP, max=CLAMP)  # (T, N)
+    eta = torch.clamp(X @ W + b, max=CLAMP)  # (T, N)
     #eta = X @ W + b                  # (T, N)
     exp_eta = torch.exp(eta)         # (T, N)
     data_loss = torch.sum(exp_eta - Y * eta, dim=0)
@@ -775,7 +775,7 @@ def _evaluate_streamed(W, b, X_cpu, Y_cpu, alpha, device, eval_batch_size):
             Yb = Y_cpu[start:end].to(device, non_blocking=True)
 
             #eta = Xb @ W + b   # NO clamp
-            eta = torch.clamp(Xb @ W + b, min=-CLAMP, max=CLAMP)
+            eta = torch.clamp(Xb @ W + b, max=CLAMP)
 
             # ✅ PyTorch NLL (correct loss)
             total_nll += F.poisson_nll_loss(
@@ -812,7 +812,7 @@ def _evaluate_full_gpu(W, b, X, Y, alpha):
     with torch.no_grad():
         loss = _poisson_loss(W, b, X, Y, alpha)
 
-        eta = torch.clamp(X @ W + b, min=-CLAMP, max=CLAMP)
+        eta = torch.clamp(X @ W + b, max=CLAMP)
         exp_eta = torch.exp(eta)
 
         mean_rate = torch.mean(Y, dim=0, keepdim=True)
