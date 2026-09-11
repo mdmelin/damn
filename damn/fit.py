@@ -24,25 +24,27 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-CLAMP = 8 # upper clamp on eta to prevent exploding rates/gradients
+CLAMP = 80 # effectively non-binding in most runs, but still below float32 exp overflow
+# TODO: float64?
 
 
-def _format_alpha(alpha, N, device):
+def _format_alpha(alpha, N, device, dtype=torch.float32):
     """Normalize alpha to shape (1, N) for consistent per-target regularization."""
-    alpha_arr = np.asarray(alpha, dtype=np.float32)
+    np_dtype = np.float64 if dtype == torch.float64 else np.float32
+    alpha_arr = np.asarray(alpha, dtype=np_dtype)
 
     if alpha_arr.ndim == 0:
-        alpha_arr = np.full((N,), float(alpha_arr), dtype=np.float32)
+        alpha_arr = np.full((N,), float(alpha_arr), dtype=np_dtype)
     else:
         alpha_arr = alpha_arr.reshape(-1)
         if alpha_arr.size == 1:
-            alpha_arr = np.full((N,), float(alpha_arr.item()), dtype=np.float32)
+            alpha_arr = np.full((N,), float(alpha_arr.item()), dtype=np_dtype)
         elif alpha_arr.size != N:
             raise ValueError(
                 f"alpha must be a scalar or length-N array (N={N}), got shape {np.shape(alpha)}"
             )
 
-    return torch.from_numpy(alpha_arr.reshape(1, N)).to(device=device, dtype=torch.float32)
+    return torch.from_numpy(alpha_arr.reshape(1, N)).to(device=device, dtype=dtype)
 
 def fit_poisson_glm_best_alpha_per_target(
     X,
@@ -311,28 +313,30 @@ def fit_poisson_glm_lbfgs(
         X, Y, val_fraction, val_inds, seed
     )
 
-    X_train = torch.from_numpy(X_train).to(device=device, dtype=torch.float32)
-    Y_train = torch.from_numpy(Y_train).to(device=device, dtype=torch.float32)
+    # Use float64 for LBFGS for more stable line-search and curvature updates.
+    dtype = torch.float64
+    X_train = torch.from_numpy(X_train).to(device=device, dtype=dtype)
+    Y_train = torch.from_numpy(Y_train).to(device=device, dtype=dtype)
 
     N = Y_train.shape[1]
-    alpha = _format_alpha(alpha, N, device)
+    alpha = _format_alpha(alpha, N, device, dtype=dtype)
 
     if has_val:
-        X_val = torch.from_numpy(X_val).to(device=device, dtype=torch.float32)
-        Y_val = torch.from_numpy(Y_val).to(device=device, dtype=torch.float32)
+        X_val = torch.from_numpy(X_val).to(device=device, dtype=dtype)
+        Y_val = torch.from_numpy(Y_val).to(device=device, dtype=dtype)
 
     T_train, p = X_train.shape
 
     if W_init is None and b_init is None:
         mean_rates = torch.mean(Y_train, dim=0)
-        W, b = _initialize_params(p, N, mean_rates, device,)
+        W, b = _initialize_params(p, N, mean_rates, device, dtype=dtype)
     else:
         # warm start from previous solution
         if len(bad_cols) > 0:
             # if we removed bad columns, we need to remove those columns from W_init as well for the warm start
             W_init = np.delete(W_init, bad_cols, axis=0)
-        W = torch.from_numpy(W_init).to(device=device, dtype=torch.float32)
-        b = torch.from_numpy(b_init).to(device=device, dtype=torch.float32)
+        W = torch.from_numpy(W_init).to(device=device, dtype=dtype)
+        b = torch.from_numpy(b_init).to(device=device, dtype=dtype)
         # add small noise safely
         with torch.no_grad():
             W += .0001 * torch.randn_like(W)
@@ -696,13 +700,12 @@ def _prepare_data(X, Y, val_fraction, val_inds=None, seed=None):
     return X_train, Y_train, X_val, Y_val, has_val
 
 
-def _initialize_params(p, N, mean_rates, device):
+def _initialize_params(p, N, mean_rates, device, dtype=torch.float32):
     #b = torch.zeros(N, device=device, requires_grad=True)
     #W = 0.01 * torch.randn(p, N, device=device, requires_grad=True)
-    #W = torch.randn(p, N, device=device) * 0.01
-    W = torch.randn(p, N, device=device) * 0.01
+    W = torch.randn(p, N, device=device, dtype=dtype) * 0.01
     W.requires_grad_(True)
-    b = torch.log(mean_rates + 1e-8).to(device).requires_grad_()
+    b = torch.log(mean_rates.to(dtype=dtype) + 1e-8).to(device=device, dtype=dtype).requires_grad_()
     
     return W, b
 
