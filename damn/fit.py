@@ -23,6 +23,8 @@ Author: Max Melin, 2026
 import torch 
 import torch.nn.functional as F
 import numpy as np
+from .optim.adam import fit_poisson_glm_adam as _fit_poisson_glm_adam_impl
+from .optim.lbfgs import fit_poisson_glm_lbfgs as _fit_poisson_glm_lbfgs_impl
 
 CLAMP = 80 # effectively non-binding in most runs, but still below float32 exp overflow
 # TODO: float64?
@@ -90,7 +92,7 @@ def fit_poisson_glm_best_alpha_per_target(
         print(f"\n--- Trying alpha = {alpha} ---")
 
         if optimizer_type.lower() == "lbfgs":
-            W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist, train_loss_per_target, val_loss_per_target = fit_poisson_glm_lbfgs(
+            result = fit_poisson_glm_lbfgs(
                 X, Y,
                 alpha=alpha,
                 max_epochs=max_epochs,
@@ -105,8 +107,13 @@ def fit_poisson_glm_best_alpha_per_target(
                 b_init=b,
                 **fit_kwargs
             )
+            W, b = result[0], result[1]
+            train_loss_hist, val_loss_hist = result[2], result[3]
+            train_bps_hist, val_bps_hist = result[4], result[5]
+            train_loss_per_target = result[6] if len(result) > 6 else None
+            val_loss_per_target = result[7] if len(result) > 7 else None
         elif optimizer_type.lower() == "adam":
-            W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist, train_loss_per_target, val_loss_per_target = fit_poisson_glm_adam(
+            result = fit_poisson_glm_adam(
                 X, Y,
                 alpha=alpha,
                 max_epochs=max_epochs,
@@ -121,8 +128,16 @@ def fit_poisson_glm_best_alpha_per_target(
                 b_init=b,
                 **fit_kwargs
             )
+            W, b = result[0], result[1]
+            train_loss_hist, val_loss_hist = result[2], result[3]
+            train_bps_hist, val_bps_hist = result[4], result[5]
+            train_loss_per_target = result[6] if len(result) > 6 else None
+            val_loss_per_target = result[7] if len(result) > 7 else None
         else:
             raise ValueError("optimizer_type must be 'lbfgs' or 'adam'")
+
+        if val_loss_per_target is None:
+            raise ValueError("Expected per-target validation loss but received None.")
 
         history[alpha] = {
             "train_loss_hist": train_loss_hist,
@@ -203,7 +218,7 @@ def fit_poisson_glm_best_alpha(
         print(f"\n--- Trying alpha = {alpha} ---")
 
         if optimizer_type.lower() == "lbfgs":
-            W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist, train_loss_per_target, val_loss_per_target = fit_poisson_glm_lbfgs(
+            result = fit_poisson_glm_lbfgs(
                 X, Y,
                 alpha=alpha,
                 max_epochs=max_epochs,
@@ -218,8 +233,13 @@ def fit_poisson_glm_best_alpha(
                 b_init=b,
                 **fit_kwargs
             )
+            W, b = result[0], result[1]
+            train_loss_hist, val_loss_hist = result[2], result[3]
+            train_bps_hist, val_bps_hist = result[4], result[5]
+            train_loss_per_target = result[6] if len(result) > 6 else None
+            val_loss_per_target = result[7] if len(result) > 7 else None
         elif optimizer_type.lower() == "adam":
-            W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist, train_loss_per_target, val_loss_per_target = fit_poisson_glm_adam(
+            result = fit_poisson_glm_adam(
                 X, Y,
                 alpha=alpha,
                 max_epochs=max_epochs,
@@ -234,8 +254,16 @@ def fit_poisson_glm_best_alpha(
                 b_init=b,
                 **fit_kwargs
             )
+            W, b = result[0], result[1]
+            train_loss_hist, val_loss_hist = result[2], result[3]
+            train_bps_hist, val_bps_hist = result[4], result[5]
+            train_loss_per_target = result[6] if len(result) > 6 else None
+            val_loss_per_target = result[7] if len(result) > 7 else None
         else:
             raise ValueError("optimizer_type must be 'lbfgs' or 'adam'")
+
+        if val_loss_per_target is None:
+            raise ValueError("Expected per-target validation loss but received None.")
 
         history[alpha] = {
             "train_loss_hist": train_loss_hist,
@@ -295,178 +323,26 @@ def fit_poisson_glm_lbfgs(
     W_init=None,
     b_init=None
 ):
-
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    if device == "cuda":
-        torch.cuda.empty_cache()
-
-    # remove X entries if all zero, all nan or all the same, save those inds to put back later
-    bad_cols = np.where(np.all(X == 0, axis=0) | np.all(np.isnan(X), axis=0) | np.all(X == X[0,:], axis=0))[0]
-    good_cols = np.where(~(np.all(X == 0, axis=0) | np.all(np.isnan(X), axis=0) | np.all(X == X[0,:], axis=0)))[0]
-    num_cols = X.shape[1]
-    print(f'Removing {len(bad_cols)} bad columns with all zeros, all nans, or all the same value')
-    X = np.delete(X, bad_cols, axis=1)
-
-    X_train, Y_train, X_val, Y_val, has_val = _prepare_data(
-        X, Y, val_fraction, val_inds, seed
-    )
-
-    # Use float64 for LBFGS for more stable line-search and curvature updates.
-    dtype = torch.float64
-    X_train = torch.from_numpy(X_train).to(device=device, dtype=dtype)
-    Y_train = torch.from_numpy(Y_train).to(device=device, dtype=dtype)
-
-    N = Y_train.shape[1]
-    alpha = _format_alpha(alpha, N, device, dtype=dtype)
-
-    if has_val:
-        X_val = torch.from_numpy(X_val).to(device=device, dtype=dtype)
-        Y_val = torch.from_numpy(Y_val).to(device=device, dtype=dtype)
-
-    T_train, p = X_train.shape
-
-    if W_init is None and b_init is None:
-        mean_rates = torch.mean(Y_train, dim=0)
-        W, b = _initialize_params(p, N, mean_rates, device, dtype=dtype)
-    else:
-        # warm start from previous solution
-        if len(bad_cols) > 0:
-            # if we removed bad columns, we need to remove those columns from W_init as well for the warm start
-            W_init = np.delete(W_init, bad_cols, axis=0)
-        W = torch.from_numpy(W_init).to(device=device, dtype=dtype)
-        b = torch.from_numpy(b_init).to(device=device, dtype=dtype)
-        # add small noise safely
-        with torch.no_grad():
-            W += .0001 * torch.randn_like(W)
-            b += .0001 * torch.randn_like(b)
-        W.requires_grad_()
-        b.requires_grad_()
-
-
-    optimizer = torch.optim.LBFGS(
-        [W, b],
-        max_iter=lbfgs_max_iter,
+    return _fit_poisson_glm_lbfgs_impl(
+        X,
+        Y,
+        alpha=alpha,
+        max_epochs=max_epochs,
+        lbfgs_max_iter=lbfgs_max_iter,
         line_search_fn=line_search_fn,
         history_size=history_size,
+        val_fraction=val_fraction,
+        early_stopping=early_stopping,
+        patience=patience,
+        tol=tol,
+        print_every=print_every,
+        seed=seed,
+        device=device,
+        per_target_loss=per_target_loss,
+        val_inds=val_inds,
+        W_init=W_init,
+        b_init=b_init,
     )
-
-    train_loss_hist, val_loss_hist = [], []
-    train_bps_hist, val_bps_hist = [], []
-
-    best_val_loss = float("inf")
-    epochs_no_improve = 0
-
-    for epoch in range(max_epochs):
-
-        def closure():
-            optimizer.zero_grad(set_to_none=True)
-            loss = _poisson_loss(W, b, X_train, Y_train, alpha)
-            loss.backward()
-            # Clip gradients here
-            #torch.nn.utils.clip_grad_norm_([W, b], max_norm=5)  # adjust max_norm as needed
-            return loss
-
-        optimizer.step(closure)
-
-        train_loss, train_bps = _evaluate_full_gpu(
-            W, b, X_train, Y_train, alpha
-        )
-
-        train_loss_hist.append(train_loss.item())
-        train_bps_hist.append(train_bps.item())
-
-        if has_val:
-            val_loss, val_bps = _evaluate_full_gpu(
-                W, b, X_val, Y_val, alpha
-            )
-            val_loss_hist.append(val_loss.item())
-            val_bps_hist.append(val_bps.item())
-
-        if has_val:
-            _print_progress(
-                epoch,
-                train_loss.item(),
-                train_bps.item(),
-                True,
-                val_loss.item(),
-                val_bps.item(),
-                print_every,
-            )
-        else:
-            _print_progress(
-                epoch,
-                train_loss.item(),
-                train_bps.item(),
-                False,
-                None,
-                None,
-                print_every,
-            )
-        if early_stopping is not None:
-            if early_stopping == 'val' and not has_val:
-                raise ValueError("Early stopping on validation loss requested but no validation set provided.")
-            elif early_stopping == 'val':
-                monitor = val_loss.item()
-            elif early_stopping == 'train':
-                monitor = train_loss.item()
-            else:
-                raise ValueError("early_stopping must be 'train', 'val', or None.")
-                
-            if best_val_loss - monitor > tol:
-                best_val_loss = monitor
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= patience:
-                    print(
-                        f"Early stopping triggered at epoch {epoch}. "
-                        f"No improvement greater than {tol} "
-                        f"for {patience} consecutive epochs."
-                    )
-                    break
-    if epoch == max_epochs - 1:
-        print(f"Warning: Reached max_epochs ({max_epochs})")
-
-    Wcpu = W.detach().cpu().numpy()
-    bcpu = b.detach().cpu().numpy()
-
-    torch.cuda.empty_cache()
-    if not per_target_loss:
-        # add back in the bad columns we removed at the beginning, filling with zeros
-        if len(bad_cols) > 0:
-            Wcpu_full = np.zeros((num_cols, N), dtype=Wcpu.dtype)
-            Wcpu_full[good_cols, :] = Wcpu
-            Wcpu = Wcpu_full
-        return (
-            Wcpu,
-            bcpu,
-            train_loss_hist,
-            val_loss_hist,
-            train_bps_hist,
-            val_bps_hist,
-        )
-    else:
-        # these losses should NOT include the alpha penalty, we just want the data likelihood
-        train_per_target_loss = _poisson_loss_per_target(W, b, X_train, Y_train,)
-        val_per_target_loss = _poisson_loss_per_target(W, b, X_val, Y_val,) if has_val else None
-
-        if len(bad_cols) > 0:
-            Wcpu_full = np.zeros((num_cols, N), dtype=Wcpu.dtype)
-            Wcpu_full[good_cols, :] = Wcpu
-            Wcpu = Wcpu_full
-
-        return (
-            Wcpu,
-            bcpu,
-            train_loss_hist,
-            val_loss_hist,
-            train_bps_hist,
-            val_bps_hist,
-            train_per_target_loss.detach().cpu().numpy(),
-            val_per_target_loss.detach().cpu().numpy() if has_val else None
-        )
 
 # ============================================================
 # -------------------- Adam Optimizer ------------------------
@@ -492,162 +368,26 @@ def fit_poisson_glm_adam(
     W_init=None,
     b_init=None
 ):
-
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    if device == "cuda":
-        torch.cuda.empty_cache()
-
-    X_train, Y_train, X_val, Y_val, has_val = _prepare_data(
-        X, Y, val_fraction, val_inds, seed
+    return _fit_poisson_glm_adam_impl(
+        X,
+        Y,
+        alpha=alpha,
+        lr=lr,
+        batch_size=batch_size,
+        max_epochs=max_epochs,
+        val_fraction=val_fraction,
+        early_stopping=early_stopping,
+        patience=patience,
+        tol=tol,
+        print_every=print_every,
+        seed=seed,
+        device=device,
+        eval_batch_size=eval_batch_size,
+        per_target_loss=per_target_loss,
+        val_inds=val_inds,
+        W_init=W_init,
+        b_init=b_init,
     )
-
-
-    X_train_cpu = torch.from_numpy(X_train).float().pin_memory()
-    Y_train_cpu = torch.from_numpy(Y_train).float().pin_memory()
-
-    N = Y_train_cpu.shape[1]
-    alpha = _format_alpha(alpha, N, device)
-
-    if has_val:
-        X_val_cpu = torch.from_numpy(X_val).float().pin_memory()
-        Y_val_cpu = torch.from_numpy(Y_val).float().pin_memory()
-
-    T_train, p = X_train_cpu.shape
-
-    if W_init is None and b_init is None:
-        mean_rates = torch.mean(Y_train_cpu, dim=0)
-        W, b = _initialize_params(p, N, mean_rates, device)
-    else:
-        # warm start from previous solution
-        W = torch.from_numpy(W_init).float().to(device)
-        b = torch.from_numpy(b_init).float().to(device)
-        # add small noise safely
-        with torch.no_grad():
-            W += .01 * torch.randn_like(W)
-            b += .01 * torch.randn_like(b)
-        W.requires_grad_()
-        b.requires_grad_()
-
-
-    optimizer = torch.optim.Adam([W, b], lr=lr)
-
-    if eval_batch_size is None:
-        eval_batch_size = batch_size
-
-    train_loss_hist, val_loss_hist = [], []
-    train_bps_hist, val_bps_hist = [], []
-
-    best_val_loss = float("inf")
-    epochs_no_improve = 0
-
-    for epoch in range(max_epochs):
-        perm = torch.randperm(T_train)
-        for start in range(0, T_train, batch_size):
-            end = min(start + batch_size, T_train)
-            idx = perm[start:end] # randomly permute to break temporal correlations
-
-            # Stream batch to GPU
-            Xb = X_train_cpu[idx].to(device, non_blocking=True)
-            Yb = Y_train_cpu[idx].to(device, non_blocking=True)
-
-            optimizer.zero_grad(set_to_none=True)
-            loss = _poisson_loss(W, b, Xb, Yb, alpha)
-            loss.backward()
-            optimizer.step()
-
-            del Xb, Yb, loss
-
-        if epoch % print_every == 0 or epoch == max_epochs - 1:
-            train_loss, train_bps = _evaluate_streamed(
-                W, b, X_train_cpu, Y_train_cpu, alpha, device, eval_batch_size
-            )
-
-            train_loss_hist.append(train_loss.item())
-            train_bps_hist.append(train_bps.item())
-
-            if has_val:
-                val_loss, val_bps = _evaluate_streamed(
-                    W, b, X_val_cpu, Y_val_cpu, alpha, device, eval_batch_size
-                )
-                val_loss_hist.append(val_loss.item())
-                val_bps_hist.append(val_bps.item())
-
-        if has_val:
-            _print_progress(
-                epoch,
-                train_loss.item(),
-                train_bps.item(),
-                True,
-                val_loss.item(),
-                val_bps.item(),
-                print_every,
-            )
-        else:
-            _print_progress(
-                epoch,
-                train_loss.item(),
-                train_bps.item(),
-                False,
-                None,
-                None,
-                print_every,
-            )
-
-        if early_stopping is not None:
-            if early_stopping == 'val' and not has_val:
-                raise ValueError("Early stopping on validation loss requested but no validation set provided.")
-            elif early_stopping == 'val':
-                monitor = val_loss.item()
-            elif early_stopping == 'train':
-                monitor = train_loss.item()
-            else:
-                raise ValueError("early_stopping must be 'train', 'val', or None.")
-
-            if best_val_loss - monitor > tol:
-                best_val_loss = monitor
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= patience:
-                    print(
-                        f"Early stopping triggered at epoch {epoch}. "
-                        f"No improvement greater than {tol} "
-                        f"for {patience} consecutive epochs."
-                    )
-                    break
-    if epoch == max_epochs - 1:
-        print(f"Warning: Reached max_epochs ({max_epochs})")
-    Wcpu = W.detach().cpu().numpy()
-    bcpu = b.detach().cpu().numpy()
-
-    torch.cuda.empty_cache()
-
-    if not per_target_loss:
-        return (
-            Wcpu,
-            bcpu,
-            train_loss_hist,
-            val_loss_hist,
-            train_bps_hist,
-            val_bps_hist,
-        )
-    else:
-        train_per_target_loss = _poisson_loss_per_target(W, b, X_train_cpu.to(device), Y_train_cpu.to(device))
-        val_per_target_loss = _poisson_loss_per_target(W, b, X_val_cpu.to(device), Y_val_cpu.to(device)) if has_val else None
-        return (
-            Wcpu,
-            bcpu,
-            train_loss_hist,
-            val_loss_hist,
-            train_bps_hist,
-            val_bps_hist,
-            train_per_target_loss.detach().cpu().numpy(),
-            val_per_target_loss.detach().cpu().numpy() if has_val else None
-        )
-
-
 
 
 # ============================================================
