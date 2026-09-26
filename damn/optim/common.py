@@ -5,6 +5,37 @@ import torch.nn.functional as F
 CLAMP = 80  # effectively non-binding in most runs, but still below float32 exp overflow
 
 
+def resolve_torch_device(device=None):
+    """Resolve requested device with CUDA -> MPS -> CPU fallback."""
+    if device is None:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        mps_backend = getattr(torch.backends, "mps", None)
+        if mps_backend is not None and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    requested = torch.device(device)
+    if requested.type == "cuda" and not torch.cuda.is_available():
+        mps_backend = getattr(torch.backends, "mps", None)
+        if mps_backend is not None and torch.backends.mps.is_available():
+            print("WARNING: CUDA requested but unavailable; falling back to MPS.")
+            return torch.device("mps")
+        print("WARNING: CUDA requested but unavailable; falling back to CPU.")
+        return torch.device("cpu")
+
+    if requested.type == "mps":
+        mps_backend = getattr(torch.backends, "mps", None)
+        if mps_backend is None or not torch.backends.mps.is_available():
+            if torch.cuda.is_available():
+                print("WARNING: MPS requested but unavailable; falling back to CUDA.")
+                return torch.device("cuda")
+            print("WARNING: MPS requested but unavailable; falling back to CPU.")
+            return torch.device("cpu")
+
+    return requested
+
+
 def format_alpha(alpha, n_targets, device, dtype=torch.float32):
     """Normalize alpha to shape (1, N) for consistent per-target regularization."""
     np_dtype = np.float64 if dtype == torch.float64 else np.float32
@@ -90,7 +121,9 @@ def poisson_loss_per_target(w, b, x, y, alpha=None):
     return data_loss + alpha * l2_per_target
 
 
-def evaluate_streamed(w, b, x_cpu, y_cpu, alpha, device, eval_batch_size):
+def evaluate_streamed(w, b, x_cpu, y_cpu, alpha, device, eval_batch_size, use_pinned_memory=False):
+    device = resolve_torch_device(device)
+    use_non_blocking = bool(use_pinned_memory and device.type == "cuda")
     with torch.no_grad():
         log2 = torch.log(torch.tensor(2.0, device=device))
         eps = 1e-12
@@ -105,8 +138,8 @@ def evaluate_streamed(w, b, x_cpu, y_cpu, alpha, device, eval_batch_size):
         for start in range(0, x_cpu.shape[0], eval_batch_size):
             end = min(start + eval_batch_size, x_cpu.shape[0])
 
-            xb = x_cpu[start:end].to(device, non_blocking=True)
-            yb = y_cpu[start:end].to(device, non_blocking=True)
+            xb = x_cpu[start:end].to(device, non_blocking=use_non_blocking)
+            yb = y_cpu[start:end].to(device, non_blocking=use_non_blocking)
 
             eta = torch.clamp(xb @ w + b, max=CLAMP)
 

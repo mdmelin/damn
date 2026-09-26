@@ -25,6 +25,7 @@ import torch.nn.functional as F
 import numpy as np
 from .optim.adam import fit_poisson_glm_adam as _fit_poisson_glm_adam_impl
 from .optim.lbfgs import fit_poisson_glm_lbfgs as _fit_poisson_glm_lbfgs_impl
+from .optim.common import resolve_torch_device
 
 CLAMP = 80 # effectively non-binding in most runs, but still below float32 exp overflow
 # TODO: float64?
@@ -73,8 +74,7 @@ def fit_poisson_glm_best_alpha_per_target(
         history: dict mapping alpha -> (train_loss_hist, val_loss_hist)
     """
 
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_torch_device(device)
     
     assert val_fraction > 0, "val_fraction must be > 0 to select best alpha based on validation loss"
     # compute train inds and val inds from val_fraction
@@ -196,8 +196,7 @@ def fit_poisson_glm_best_alpha(
         history: dict mapping alpha -> (train_loss_hist, val_loss_hist)
     """
 
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_torch_device(device)
     
 
     
@@ -587,6 +586,7 @@ def _print_progress(epoch, train_loss, train_bps,
 
 
 def choose_optimizer(X, Y, buffer_factor=1.2,):
+    raise NotImplementedError()
     """
     Decide whether to use LBFGS (full-batch) or Adam (minibatch) based on dataset size 
     and estimated memory requirements.
@@ -616,25 +616,29 @@ def choose_optimizer(X, Y, buffer_factor=1.2,):
     total_mem_needed = (X_mem + Y_mem + W_mem + b_mem) * buffer_factor
     print(f'Total memory needed for LBFGS: {total_mem_needed / 1e9:.2e} GB (X: {X_mem / 1e9:.2e} GB, Y: {Y_mem / 1e9:.2e} GB, W: {W_mem / 1e9:.2e} GB, b: {b_mem / 1e9:.2e} GB)')
 
-    # Check GPU memory
+    # Check CUDA memory if available
     if torch.cuda.is_available():
         gpu_mem = torch.cuda.get_device_properties(0).total_memory
         if total_mem_needed < gpu_mem:
             return "lbfgs", None
-        else:
-            # pick minibatch size so that it would fit in GPU memory
-            # We can estimate the memory for a single batch as:
-            batch_W_mem = p * N * xbytes
-            batch_b_mem = N * xbytes
-            batch_size = int((gpu_mem / buffer_factor - batch_W_mem - batch_b_mem) / (p * xbytes + N * ybytes))
-            return "adam", batch_size
-    else:
-        print('WARNING: NO GPU AVAILIBLE')
-        return None, None
-        # CPU fallback: assume ~16GB available, same logic
-        cpu_mem_limit = 16 * 1024**3
-        if total_mem_needed < cpu_mem_limit:
+
+        batch_W_mem = p * N * xbytes
+        batch_b_mem = N * xbytes
+        batch_size = int((gpu_mem / buffer_factor - batch_W_mem - batch_b_mem) / (p * xbytes + N * ybytes))
+        return "adam", max(1, batch_size)
+
+    # MPS has no simple VRAM query via torch, so use conservative heuristic.
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is not None and torch.backends.mps.is_available():
+        if total_mem_needed < 8 * 1024**3:
             return "lbfgs", None
-        else:
-            batch_size = min(max(1, int(T * 0.01)), 4096)
-            return "adam", batch_size
+        batch_size = min(max(1, int(T * 0.01)), 4096)
+        print("WARNING: MPS memory query unavailable; using heuristic batch-size recommendation.")
+        return "adam", batch_size
+
+    print('WARNING: NO GPU AVAILABLE; using CPU memory heuristic')
+    cpu_mem_limit = 16 * 1024**3
+    if total_mem_needed < cpu_mem_limit:
+        return "lbfgs", None
+    batch_size = min(max(1, int(T * 0.01)), 4096)
+    return "adam", batch_size

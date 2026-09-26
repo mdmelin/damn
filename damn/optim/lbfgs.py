@@ -9,6 +9,7 @@ from .common import (
     poisson_loss_per_target,
     prepare_data,
     print_progress,
+    resolve_torch_device,
 )
 
 
@@ -32,10 +33,9 @@ def fit_poisson_glm_lbfgs(
     W_init=None,
     b_init=None,
 ):
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_torch_device(device)
 
-    if device == "cuda":
+    if device.type == "cuda":
         torch.cuda.empty_cache()
 
     bad_cols = np.where(
@@ -162,7 +162,7 @@ def fit_poisson_glm_lbfgs(
     Wcpu = W.detach().cpu().numpy()
     bcpu = b.detach().cpu().numpy()
 
-    if device == "cuda":
+    if device.type == "cuda":
         torch.cuda.empty_cache()
 
     if len(bad_cols) > 0:

@@ -8,6 +8,7 @@ from .common import (
     poisson_loss_per_target,
     prepare_data,
     print_progress,
+    resolve_torch_device,
 )
 
 
@@ -31,18 +32,22 @@ def fit_poisson_glm_adam(
     W_init=None,
     b_init=None,
 ):
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_torch_device(device)
+    use_pinned_memory = device.type == "cuda"
 
-    if device == "cuda":
+    if device.type == "cuda":
         torch.cuda.empty_cache()
 
     X_train, Y_train, X_val, Y_val, has_val = prepare_data(
         X, Y, val_fraction, val_inds, seed
     )
 
-    X_train_cpu = torch.from_numpy(X_train).float().pin_memory()
-    Y_train_cpu = torch.from_numpy(Y_train).float().pin_memory()
+    if use_pinned_memory:
+        X_train_cpu = torch.from_numpy(X_train).float().pin_memory()
+        Y_train_cpu = torch.from_numpy(Y_train).float().pin_memory()
+    else:
+        X_train_cpu = torch.from_numpy(X_train).float()
+        Y_train_cpu = torch.from_numpy(Y_train).float()
 
     N = Y_train_cpu.shape[1]
     alpha = format_alpha(alpha, N, device, dtype=torch.float32)
@@ -50,8 +55,12 @@ def fit_poisson_glm_adam(
     X_val_cpu = None
     Y_val_cpu = None
     if has_val:
-        X_val_cpu = torch.from_numpy(X_val).float().pin_memory()
-        Y_val_cpu = torch.from_numpy(Y_val).float().pin_memory()
+        if use_pinned_memory:
+            X_val_cpu = torch.from_numpy(X_val).float().pin_memory()
+            Y_val_cpu = torch.from_numpy(Y_val).float().pin_memory()
+        else:
+            X_val_cpu = torch.from_numpy(X_val).float()
+            Y_val_cpu = torch.from_numpy(Y_val).float()
 
     T_train, p = X_train_cpu.shape
 
@@ -79,13 +88,13 @@ def fit_poisson_glm_adam(
     epochs_no_improve = 0
 
     train_loss, train_bps = evaluate_streamed(
-        W, b, X_train_cpu, Y_train_cpu, alpha, device, eval_batch_size
+        W, b, X_train_cpu, Y_train_cpu, alpha, device, eval_batch_size, use_pinned_memory
     )
     val_loss = None
     val_bps = None
     if has_val:
         val_loss, val_bps = evaluate_streamed(
-            W, b, X_val_cpu, Y_val_cpu, alpha, device, eval_batch_size
+            W, b, X_val_cpu, Y_val_cpu, alpha, device, eval_batch_size, use_pinned_memory
         )
 
     for epoch in range(max_epochs):
@@ -94,8 +103,8 @@ def fit_poisson_glm_adam(
             end = min(start + batch_size, T_train)
             idx = perm[start:end]
 
-            xb = X_train_cpu[idx].to(device, non_blocking=True)
-            yb = Y_train_cpu[idx].to(device, non_blocking=True)
+            xb = X_train_cpu[idx].to(device, non_blocking=use_pinned_memory)
+            yb = Y_train_cpu[idx].to(device, non_blocking=use_pinned_memory)
 
             optimizer.zero_grad(set_to_none=True)
             loss = poisson_loss(W, b, xb, yb, alpha)
@@ -106,14 +115,14 @@ def fit_poisson_glm_adam(
 
         if epoch % print_every == 0 or epoch == max_epochs - 1:
             train_loss, train_bps = evaluate_streamed(
-                W, b, X_train_cpu, Y_train_cpu, alpha, device, eval_batch_size
+                W, b, X_train_cpu, Y_train_cpu, alpha, device, eval_batch_size, use_pinned_memory
             )
             train_loss_hist.append(float(train_loss))
             train_bps_hist.append(float(train_bps))
 
             if has_val:
                 val_loss, val_bps = evaluate_streamed(
-                    W, b, X_val_cpu, Y_val_cpu, alpha, device, eval_batch_size
+                    W, b, X_val_cpu, Y_val_cpu, alpha, device, eval_batch_size, use_pinned_memory
                 )
                 val_loss_hist.append(float(val_loss))
                 val_bps_hist.append(float(val_bps))
@@ -161,7 +170,7 @@ def fit_poisson_glm_adam(
     Wcpu = W.detach().cpu().numpy()
     bcpu = b.detach().cpu().numpy()
 
-    if device == "cuda":
+    if device.type == "cuda":
         torch.cuda.empty_cache()
 
     if not per_target_loss:
@@ -174,9 +183,19 @@ def fit_poisson_glm_adam(
             val_bps_hist,
         )
 
-    train_per_target_loss = poisson_loss_per_target(W, b, X_train_cpu.to(device), Y_train_cpu.to(device))
+    train_per_target_loss = poisson_loss_per_target(
+        W,
+        b,
+        X_train_cpu.to(device, non_blocking=use_pinned_memory),
+        Y_train_cpu.to(device, non_blocking=use_pinned_memory),
+    )
     val_per_target_loss = (
-        poisson_loss_per_target(W, b, X_val_cpu.to(device), Y_val_cpu.to(device))
+        poisson_loss_per_target(
+            W,
+            b,
+            X_val_cpu.to(device, non_blocking=use_pinned_memory),
+            Y_val_cpu.to(device, non_blocking=use_pinned_memory),
+        )
         if has_val and X_val_cpu is not None and Y_val_cpu is not None
         else None
     )
