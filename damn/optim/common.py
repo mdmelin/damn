@@ -2,7 +2,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-CLAMP = 80  # effectively non-binding in most runs, but still below float32 exp overflow
+CLAMP = 20  # balanced high-side clamp for stability vs flexibility
+CLAMP_MIN = -20  # low-side guard for numerical stability in y * eta terms
 
 
 def resolve_torch_device(device=None):
@@ -98,7 +99,7 @@ def initialize_params(n_features, n_targets, mean_rates, device, dtype=torch.flo
 
 
 def poisson_loss(w, b, x, y, alpha=None):
-    eta = torch.clamp(x @ w + b, max=CLAMP)
+    eta = torch.clamp(x @ w + b, min=CLAMP_MIN, max=CLAMP)
     data_loss = F.poisson_nll_loss(
         input=eta,
         target=y,
@@ -112,7 +113,7 @@ def poisson_loss(w, b, x, y, alpha=None):
 
 
 def poisson_loss_per_target(w, b, x, y, alpha=None):
-    eta = torch.clamp(x @ w + b, max=CLAMP)
+    eta = torch.clamp(x @ w + b, min=CLAMP_MIN, max=CLAMP)
     exp_eta = torch.exp(eta)
     data_loss = torch.sum(exp_eta - y * eta, dim=0)
     if alpha is None:
@@ -141,7 +142,7 @@ def evaluate_streamed(w, b, x_cpu, y_cpu, alpha, device, eval_batch_size, use_pi
             xb = x_cpu[start:end].to(device, non_blocking=use_non_blocking)
             yb = y_cpu[start:end].to(device, non_blocking=use_non_blocking)
 
-            eta = torch.clamp(xb @ w + b, max=CLAMP)
+            eta = torch.clamp(xb @ w + b, min=CLAMP_MIN, max=CLAMP)
 
             total_nll += F.poisson_nll_loss(
                 eta,
@@ -173,7 +174,7 @@ def evaluate_full_gpu(w, b, x, y, alpha):
     with torch.no_grad():
         loss = poisson_loss(w, b, x, y, alpha)
 
-        eta = torch.clamp(x @ w + b, max=CLAMP)
+        eta = torch.clamp(x @ w + b, min=CLAMP_MIN, max=CLAMP)
         exp_eta = torch.exp(eta)
 
         mean_rate = torch.mean(y, dim=0, keepdim=True)

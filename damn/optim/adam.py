@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 from .common import (
@@ -37,6 +38,25 @@ def fit_poisson_glm_adam(
 
     if device.type == "cuda":
         torch.cuda.empty_cache()
+
+    bad_cols = np.where(
+        np.all(X == 0, axis=0)
+        | np.all(np.isnan(X), axis=0)
+        | np.all(X == X[0, :], axis=0)
+    )[0]
+    good_cols = np.where(
+        ~(
+            np.all(X == 0, axis=0)
+            | np.all(np.isnan(X), axis=0)
+            | np.all(X == X[0, :], axis=0)
+        )
+    )[0]
+    num_cols = X.shape[1]
+    print(f"Removing {len(bad_cols)} bad columns with all zeros, all nans, or all the same value")
+    if len(bad_cols) > 0:
+        X = np.delete(X, bad_cols, axis=1)
+        if W_init is not None:
+            W_init = np.delete(W_init, bad_cols, axis=0)
 
     X_train, Y_train, X_val, Y_val, has_val = prepare_data(
         X, Y, val_fraction, val_inds, seed
@@ -169,6 +189,11 @@ def fit_poisson_glm_adam(
 
     Wcpu = W.detach().cpu().numpy()
     bcpu = b.detach().cpu().numpy()
+
+    if len(bad_cols) > 0:
+        Wcpu_full = np.zeros((num_cols, N), dtype=Wcpu.dtype)
+        Wcpu_full[good_cols, :] = Wcpu
+        Wcpu = Wcpu_full
 
     if device.type == "cuda":
         torch.cuda.empty_cache()

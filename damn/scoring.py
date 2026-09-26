@@ -5,7 +5,10 @@ def bits_per_spike(y_true, y_pred):
     Gerstner, W., Kistler, W. M., Naud, R., & Paninski, L. Neuronal Dynamics: From Single Neurons to Networks and Models of Cognition. Chapter 10. “Evaluating Goodness-of-fit”. 2014.
     '''
     eps = 1e-12
-    y_pred = np.clip(y_pred, eps, None)
+    # Keep predicted rates finite and strictly positive for stable log-likelihood math.
+    max_rate = 1e12
+    y_pred = np.nan_to_num(y_pred, nan=eps, posinf=max_rate, neginf=eps)
+    y_pred = np.clip(y_pred, eps, max_rate)
 
     # Model log-likelihood
     ll_model = np.sum(y_true * np.log(y_pred) - y_pred)
