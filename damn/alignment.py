@@ -3,6 +3,7 @@ from collections.abc import Iterable
 from functools import partial
 from tqdm import tqdm
 from multiprocessing.pool import Pool,ThreadPool
+from scipy.ndimage import median_filter
 
 def construct_timebins(pre_seconds, post_seconds, binwidth_s):
     if pre_seconds < 0 and post_seconds < 0:
@@ -37,6 +38,92 @@ def resample_to_timebins(master_times, sample_times, sample_values):
     for i in range(sample_values.shape[1]):
         resampled_values[:,i] = np.interp(master_times, sample_times, sample_values[:,i], left=0, right=0)
     return resampled_values
+
+def interp_over_outliers(x, window_size=5, threshold=3.0, max_iter=2):
+    """Replace outliers using a Hampel filter + interpolation.
+
+    Parameters
+    ----------
+    x : array-like
+        1D time series or 2D array with shape (n_samples, n_features).
+    window_size : int, optional
+        Sliding Hampel window size (must be odd). Default is 5.
+    threshold : float, optional
+        Number of robust standard deviations for outlier detection.
+        Default is 3.0.
+    max_iter : int, optional
+        Number of Hampel+interpolation passes. Multiple passes can remove
+        residual jumps that survive a single pass. Default is 2.
+
+    Returns
+    -------
+    numpy.ndarray
+        Copy of ``x`` with Hampel-detected outliers replaced by linear interpolation.
+        For 2D input, filtering is applied independently to each column.
+    """
+    x = np.asarray(x, dtype=float)
+    if x.ndim not in (1, 2):
+        raise ValueError('interp_over_outliers expects a 1D or 2D array.')
+    if window_size < 3 or window_size % 2 == 0:
+        raise ValueError('window_size must be an odd integer >= 3.')
+    if threshold <= 0:
+        raise ValueError('threshold must be > 0.')
+    if int(max_iter) != max_iter or max_iter < 1:
+        raise ValueError('max_iter must be an integer >= 1.')
+    max_iter = int(max_iter)
+
+    scale = 1.4826  # Convert MAD to robust std estimate for Gaussian data.
+
+    def _outlier_mask(arr, med, mad):
+        abs_dev = np.abs(arr - med)
+        finite_mask = np.isfinite(arr) & np.isfinite(med) & np.isfinite(mad)
+        mask = finite_mask & (abs_dev > (threshold * scale * mad))
+
+        zero_mad_mask = finite_mask & (mad <= 0)
+        mask[zero_mad_mask] = arr[zero_mad_mask] != med[zero_mad_mask]
+        return mask
+
+    def _interp_1d(arr, med=None, mad=None):
+        if arr.size < 3:
+            return arr.copy()
+
+        cleaned_arr = arr.copy()
+        for pass_idx in range(max_iter):
+            if pass_idx == 0 and med is not None and mad is not None:
+                outlier_mask = _outlier_mask(cleaned_arr, med, mad)
+            else:
+                med = median_filter(cleaned_arr, size=window_size, mode='nearest')
+                abs_dev = np.abs(cleaned_arr - med)
+                mad = median_filter(abs_dev, size=window_size, mode='nearest')
+                outlier_mask = _outlier_mask(cleaned_arr, med, mad)
+
+            outlier_inds = np.where(outlier_mask)[0]
+            if outlier_inds.size == 0:
+                break
+
+            valid_inds = np.where(~outlier_mask & np.isfinite(cleaned_arr))[0]
+            if valid_inds.size < 2:
+                break
+
+            cleaned_arr[outlier_mask] = np.interp(outlier_inds, valid_inds, cleaned_arr[valid_inds])
+        return cleaned_arr
+
+    if x.ndim == 1:
+        return _interp_1d(x)
+
+    cleaned = x.copy()
+    if max_iter == 1:
+        med_2d = median_filter(cleaned, size=(window_size, 1), mode='nearest')
+        abs_dev_2d = np.abs(cleaned - med_2d)
+        mad_2d = median_filter(abs_dev_2d, size=(window_size, 1), mode='nearest')
+
+        for col in range(cleaned.shape[1]):
+            cleaned[:, col] = _interp_1d(cleaned[:, col], med=med_2d[:, col], mad=mad_2d[:, col])
+        return cleaned
+
+    for col in range(cleaned.shape[1]):
+        cleaned[:, col] = _interp_1d(cleaned[:, col])
+    return cleaned
 
 '''
 Many of these functions below are adopted from https://github.com/spkware/spks (Couto and Melin, 2025).
