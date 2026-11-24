@@ -62,7 +62,7 @@ stim_reg = EventRegressor(
 	name="stimulus",
 	event_times=stim_times,
 	event_values=stim_contrasts,
-	basis_objects=[RaisedCosineBasis(8, 0, 0.6, BINWIDTH_S, log_scale=True)],
+	basis_objects=[RaisedCosineBasis(8, 0, 0.6, None, log_scale=True)],
 )
 
 dmat = DesignMatrix(
@@ -71,7 +71,8 @@ dmat = DesignMatrix(
 	master_post_s=POST_S,
 	binwidth_s=BINWIDTH_S,
 )
-# Regressors inherit binwidth_s from the parent DesignMatrix.
+# Regressors and basis objects resolve binwidth_s from the parent DesignMatrix.
+# Basis objects created with binwidth_s=None are constructed lazily at build time.
 dmat.add_regressor(stim_reg)
 dmat.build_matrix()
 
@@ -200,6 +201,8 @@ Notebook examples:
 ## Notes and current behavior
 
 - DAMN is designed around fixed bin width across regressors.
+- DesignMatrix is the source of truth for binwidth_s.
+- Basis objects can be initialized with binwidth_s=None and are constructed lazily when a regressor is built inside a DesignMatrix.
 - Trialized matrices are typically preferred over non-trialized matrices.
 - Some basis families are intentionally stubbed and raise `NotImplementedError`.
 - For best GPU performance, prefer `fit_poisson_glm_lbfgs` when memory allows.
