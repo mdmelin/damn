@@ -2,9 +2,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-CLAMP = 20  # balanced high-side clamp for stability vs flexibility
+CLAMP = 8  # balanced high-side clamp for stability vs flexibility
 CLAMP_MIN = -20  # low-side guard for numerical stability in y * eta terms
 
+CLAMP = 20  # balanced high-side clamp for stability vs flexibility
+CLAMP_MIN = -float('inf')  # low-side guard for numerical stability in y * eta terms
 
 def resolve_torch_device(device=None):
     """Resolve requested device with CUDA -> MPS -> CPU fallback."""
@@ -92,7 +94,7 @@ def prepare_data(x, y, val_fraction, val_inds=None, seed=None):
 
 
 def initialize_params(n_features, n_targets, mean_rates, device, dtype=torch.float32):
-    w = torch.randn(n_features, n_targets, device=device, dtype=dtype) * 0.01
+    w = torch.randn(n_features, n_targets, device=device, dtype=dtype) * 0.1
     w.requires_grad_(True)
     b = torch.log(mean_rates.to(dtype=dtype) + 1e-8).to(device=device, dtype=dtype).requires_grad_()
     return w, b
@@ -113,7 +115,8 @@ def poisson_loss(w, b, x, y, alpha=None):
 
 
 def poisson_loss_per_target(w, b, x, y, alpha=None):
-    eta = torch.clamp(x @ w + b, min=CLAMP_MIN, max=CLAMP)
+    #eta = torch.clamp(x @ w + b, min=CLAMP_MIN, max=CLAMP)
+    eta = x @ w + b
     exp_eta = torch.exp(eta)
     data_loss = torch.sum(exp_eta - y * eta, dim=0)
     if alpha is None:

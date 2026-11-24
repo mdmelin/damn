@@ -49,7 +49,7 @@ def fit_poisson_glm_best_alpha_per_target(
     early_stopping='train',
     warm_start=False,
     patience=10,
-    tol=1e-7,
+    tol=1e-8,
     device=None,
     **fit_kwargs                    # extra kwargs to pass to the optimizer-specific fit function
 ):
@@ -92,8 +92,8 @@ def fit_poisson_glm_best_alpha_per_target(
                 tol=tol,
                 device=device,
                 per_target_loss=True,
-                W_init=W,
-                b_init=b,
+                W_init=W if warm_start else None,
+                b_init=b if warm_start else None,
                 **fit_kwargs
             )
             W, b = result[0], result[1]
@@ -112,8 +112,8 @@ def fit_poisson_glm_best_alpha_per_target(
                 tol=tol,
                 device=device,
                 per_target_loss=True,
-                W_init=W,
-                b_init=b,
+                W_init=W if warm_start else None,
+                b_init=b if warm_start else None,
                 **fit_kwargs
             )
             W, b = result[0], result[1]
@@ -179,7 +179,7 @@ def fit_poisson_glm_best_alpha(
     val_fraction=0.1,
     early_stopping='train',
     patience=10,
-    tol=1e-4,
+    tol=1e-8,
     device=None,
     warm_start=False,
     **fit_kwargs                    # extra kwargs to pass to the optimizer-specific fit function
@@ -311,9 +311,9 @@ def fit_poisson_glm_lbfgs(
     Y,
     alpha=0.0,
     max_epochs=1000,
-    lbfgs_max_iter=20,
+    lbfgs_max_iter=100,
     line_search_fn="strong_wolfe",
-    history_size=10,
+    history_size=100,
     val_fraction=0.0,
     early_stopping=None, # 'train' or 'val' or None
     patience=10,
@@ -361,7 +361,7 @@ def fit_poisson_glm_adam(
     val_fraction=0.0,
     early_stopping=None, # 'train' or 'val' or None
     patience=10,
-    tol=1e-4,
+    tol=1e-8,
     print_every=5,
     seed=None,
     device=None,
@@ -393,7 +393,6 @@ def fit_poisson_glm_adam(
     )
 
 def choose_optimizer(X, Y, buffer_factor=1.2,):
-    raise NotImplementedError()
     """
     Decide whether to use LBFGS (full-batch) or Adam (minibatch) based on dataset size 
     and estimated memory requirements.
