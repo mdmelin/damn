@@ -62,7 +62,6 @@ stim_reg = EventRegressor(
 	name="stimulus",
 	event_times=stim_times,
 	event_values=stim_contrasts,
-	binwidth_s=BINWIDTH_S,
 	basis_objects=[RaisedCosineBasis(8, 0, 0.6, BINWIDTH_S, log_scale=True)],
 )
 
@@ -72,6 +71,7 @@ dmat = DesignMatrix(
 	master_post_s=POST_S,
 	binwidth_s=BINWIDTH_S,
 )
+# Regressors inherit binwidth_s from the parent DesignMatrix.
 dmat.add_regressor(stim_reg)
 dmat.build_matrix()
 

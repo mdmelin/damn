@@ -235,9 +235,6 @@ def fir_basis(impulse_binsize_s, pre_s, post_s, binwidth_s):
         basis[:, k] = ((t >= start_time) & (t < end_time)).astype(float)
     return basis, t
 
-def radial_basis():
-    raise NotImplementedError("Radial basis functions not implemented yet.")
-
 
 ##############################################
 #### Basis functions for periodic signals ####

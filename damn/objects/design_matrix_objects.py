@@ -21,6 +21,8 @@ class DesignMatrix:
             # DesignMatrix objects can safely share source templates.
             reg_to_store = copy.deepcopy(regressor) if copy_regressor else regressor
 
+            reg_to_store.set_parent_design_matrix(self)
+
             # TODO: add by name and specify the type (Event or Continuous) and parameters (including basis functions)
             # first check if overwriting an existing regressor
             if reg_to_store.name in self.regressors:

@@ -1,7 +1,7 @@
 import numpy as np
 from ..design_matrix import generate_aligned_bases
 from .basis_function_objects import _is_basis_function_like, basis_function_classes, CustomBasisFunction
-from ..alignment import generate_master_alignment_bin_times, resample_to_timebins
+from ..alignment import generate_master_alignment_bin_times, resample_to_timebins, interp_over_outliers
 
 '''
 An object oriented interface for working with basis functions and regressors. 
@@ -14,8 +14,8 @@ for that regressor.
 # =========================
 
 class EventRegressor:
-    def __init__(self, name, event_times, binwidth_s,
-                 event_values=None, basis_objects=None, tags=None):
+    def __init__(self, name, event_times,
+                 event_values=None, scaling=None, basis_objects=None, tags=None):
         self.name = name
         if isinstance(tags, str):
             self.tags = {tags}
@@ -23,7 +23,7 @@ class EventRegressor:
             self.tags = set(tags or []) # for grouping regressors
 
         self.event_times = event_times
-        self.binwidth_s = binwidth_s
+        self._parent_dmat = None
 
         self.basis_functions = []
 
@@ -33,6 +33,7 @@ class EventRegressor:
         self._coefficients = None  # internal storage
         self._shuffle = False
         self._zeroed = False
+        self._scaling = scaling # none, 'minmax','zscore
 
         if event_values is None:
             self.event_values = np.ones_like(event_times)
@@ -45,8 +46,19 @@ class EventRegressor:
                 assert _is_basis_function_like(basis_obj)
                 self.basis_functions.append(basis_obj)
 
+    def set_parent_design_matrix(self, design_matrix):
+        self._parent_dmat = design_matrix
+
+    def _get_binwidth_s(self):
+        if self._parent_dmat is not None:
+            return self._parent_dmat.binwidth_s
+        raise ValueError(
+            f'Regressor "{self.name}" is not attached to a DesignMatrix. '
+            "Attach it to a DesignMatrix before calling binwidth-dependent operations."
+        )
+
     def add_basis_function(self, basis_function,
-                           pre_s=None, post_s=None, **kwargs):
+                           pre_s=None, post_s=None, binwidth_s=None, **kwargs):
         if self.X is not None:
             raise RuntimeError("Cannot add basis functions after build()")
 
@@ -57,27 +69,40 @@ class EventRegressor:
             if basis_function not in basis_function_classes:
                 raise ValueError(f"Unknown basis function: {basis_function}")
 
+            if binwidth_s is None:
+                # Allow deferred construction when regressor is not yet attached.
+                try:
+                    binwidth_s = self._get_binwidth_s()
+                except ValueError:
+                    binwidth_s = None
+
             #assert pre_s is not None and post_s is not None
             basis_class = basis_function_classes[basis_function]
             self.basis_functions.append(
                 basis_class(
                     pre_s=pre_s,
                     post_s=post_s,
-                    binwidth_s=self.binwidth_s,
+                    binwidth_s=binwidth_s,
                     **kwargs,
                 )
             )
 
         elif isinstance(basis_function, np.ndarray):
+            if binwidth_s is None:
+                try:
+                    binwidth_s = self._get_binwidth_s()
+                except ValueError:
+                    binwidth_s = None
             self.basis_functions.append(
                 CustomBasisFunction(
-                    basis_function, pre_s, post_s, self.binwidth_s
+                    basis_function, pre_s, post_s, binwidth_s
                 )
             )
 
     def build_regressor(self, master_alignment_times,
               master_pre_s, master_post_s):
         # TODO: add option to shuffle this regressor
+        binwidth_s = self._get_binwidth_s()
 
         aligned_bases = []
 
@@ -85,17 +110,26 @@ class EventRegressor:
             raise RuntimeError(f'No basis functions added for regressor "{self.name}"')
 
         for basis in self.basis_functions:
+            if hasattr(basis, "ensure_constructed"):
+                basis.ensure_constructed(binwidth_s)
             aligned_basis, _, _ = generate_aligned_bases(
                 master_alignment_times=master_alignment_times,
                 master_pre_s=master_pre_s,
                 master_post_s=master_post_s,
                 event_times=self.event_times,
-                binwidth_s=self.binwidth_s,
+                binwidth_s=binwidth_s,
                 basis=basis.basis,
                 basis_time=basis.basis_time,
                 basis_scaling_vals=self.event_values,
             )
             aligned_bases.append(aligned_basis)
+
+        if self._scaling == 'minmax':
+            aligned_bases = [(block - np.min(block, axis=0)) / (np.max(block, axis=0) - np.min(block, axis=0)) for block in aligned_bases]
+        elif self._scaling == 'zscore':
+            aligned_bases = [(block - np.nanmean(block, axis=0)) / np.nanstd(block, axis=0) for block in aligned_bases]
+        elif self._scaling is not None:
+            raise ValueError(f"Unknown scaling method: {self._scaling}")
 
         self._X_blocks = aligned_bases
         self._X = np.hstack(self._X_blocks)
@@ -188,8 +222,9 @@ class EventRegressor:
         # --- common time axis ---
         min_time = min(t[0] for t in times)
         max_time = max(t[-1] for t in times)
+        binwidth_s = self._get_binwidth_s()
         full_time = np.arange(
-            min_time, max_time + self.binwidth_s, self.binwidth_s
+            min_time, max_time + binwidth_s, binwidth_s
         )
 
         T = len(full_time)
@@ -332,9 +367,9 @@ class ContinuousRegressor(EventRegressor):
     - TODO: add option for thresholded event crossing?
     '''
     def __init__(self, name, sample_times, sample_values,
-                 target_binwidth_s, zscore=True, basis_objects=None, tags=None,):
+                 scaling=None, remove_outliers=False, basis_objects=None, tags=None,):
 
-        super().__init__(name, event_times=None, binwidth_s=target_binwidth_s,
+        super().__init__(name, event_times=None,
                  event_values=None, basis_objects=basis_objects, tags=tags)
 
         # arbitrary times and values
@@ -343,19 +378,24 @@ class ContinuousRegressor(EventRegressor):
             sample_values = np.expand_dims(sample_values, 1)
         self.sample_values = sample_values
         # times and values aligned to the master design matrix (same as EventRegressor)
+        self.remove_outliers = remove_outliers
         self.event_times = None # created during .build()
         self.event_values = None # created during .build()
-        self.zscore = zscore
+        self._scaling = scaling # TODO: make 'scaling' instead
 
     def build_regressor(self, master_alignment_times,
               master_pre_s, master_post_s):
-        master_bin_times = generate_master_alignment_bin_times(master_alignment_times,
-                                                               master_pre_s,
-                                                               master_post_s,
-                                                               self.binwidth_s)
-            
-            
-            
+        binwidth_s = self._get_binwidth_s()
+        master_bin_times = generate_master_alignment_bin_times(
+            master_alignment_times,
+            master_pre_s,
+            master_post_s,
+            binwidth_s,
+        )
+
+        if self.remove_outliers:
+            self.sample_values = interp_over_outliers(self.sample_values)
+
         resampled_values = resample_to_timebins(master_bin_times, self.sample_times, self.sample_values)
 
         self.event_times = master_bin_times
@@ -366,10 +406,11 @@ class ContinuousRegressor(EventRegressor):
 
         super().build_regressor(master_alignment_times, master_pre_s, master_post_s)
 
-        # otionally, z-score the continuous regressors
-        if self.zscore:
-            self._X = (self._X - np.nanmean(self._X, axis=0)) / np.nanstd(self._X, axis=0)
-            self._X_blocks = [ (block - np.nanmean(block, axis=0)) / np.nanstd(block, axis=0) for block in self._X_blocks ]
+        # otionally, z-score the continuous regressors 
+        # now doing this after regresssor construction
+        #if self.zscore:
+        #    self._X = (self._X - np.nanmean(self._X, axis=0)) / np.nanstd(self._X, axis=0)
+        #    self._X_blocks = [ (block - np.nanmean(block, axis=0)) / np.nanstd(block, axis=0) for block in self._X_blocks ]
 
     def __str__(self):
         string = (
@@ -387,11 +428,10 @@ class SpatialRegressor(EventRegressor):
 
 class CategoricalRegressor(EventRegressor):
     def __init__(self, name, event_times, categories,
-                 binwidth_s, basis_objects=None):
+                 basis_objects=None):
         super().__init__(
             name=name,
             event_times=event_times,
-            binwidth_s=binwidth_s,
             event_values=None,
             basis_objects=basis_objects,
         )

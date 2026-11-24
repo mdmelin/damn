@@ -1,3 +1,5 @@
+import numpy as np
+from typing import Tuple
 from abc import ABC, abstractmethod
 from ..basis_functions import *
 
@@ -16,14 +18,55 @@ class BasisFunction(ABC):
         self.pre_s = pre_s
         self.post_s = post_s
         self.binwidth_s = binwidth_s
+        self.basis = None
+        self.basis_time = None
+        self.t0 = None
+        if self.binwidth_s is not None:
+            self.basis, self.basis_time = self.construct_basis()
+            self.t0 = np.searchsorted(self.basis_time, 0.0)
+
+    @abstractmethod
+    def construct_basis(self) -> Tuple[np.ndarray, np.ndarray]:
+        pass
+
+    def set_binwidth(self, binwidth_s):
+        if binwidth_s is None:
+            raise ValueError("binwidth_s cannot be None")
+
+        if self.binwidth_s is None:
+            self.binwidth_s = binwidth_s
+            self.basis, self.basis_time = self.construct_basis()
+            self.t0 = np.searchsorted(self.basis_time, 0.0)
+            return
+
+        if not np.isclose(self.binwidth_s, binwidth_s):
+            raise ValueError(
+                f"Basis binwidth_s={self.binwidth_s} does not match requested {binwidth_s}"
+            )
+
+        if self.basis is None or self.basis_time is None:
+            self.basis, self.basis_time = self.construct_basis()
+            self.t0 = np.searchsorted(self.basis_time, 0.0)
+
+    def ensure_constructed(self, binwidth_s=None):
+        if self.basis is not None and self.basis_time is not None:
+            return
+
+        if self.binwidth_s is None:
+            if binwidth_s is None:
+                raise ValueError(
+                    f"{self.__class__.__name__} needs binwidth_s before it can be constructed"
+                )
+            self.set_binwidth(binwidth_s)
+            return
+
         self.basis, self.basis_time = self.construct_basis()
         self.t0 = np.searchsorted(self.basis_time, 0.0)
 
-    @abstractmethod
-    def construct_basis(self):
-        pass
-
     def reconstruct_kernel(self, coeffs):
+        self.ensure_constructed()
+        if self.basis is None or self.basis_time is None:
+            raise RuntimeError("Basis is not constructed")
         if len(coeffs) != self.basis.shape[1]:
             raise ValueError(
                 f"Coefficient length {len(coeffs)} does not match "
@@ -34,11 +77,18 @@ class BasisFunction(ABC):
         return kernel, self.basis_time
 
     def __getitem__(self, key):
+        self.ensure_constructed()
+        if self.basis is None:
+            raise RuntimeError("Basis is not constructed")
         return self.basis[key]
 
     def __str__(self):
+        if self.basis is None:
+            shape = "<unconstructed>"
+        else:
+            shape = self.basis.shape
         return (
-            f"{self.__class__.__name__} with shape {self.basis.shape}. "
+            f"{self.__class__.__name__} with shape {shape}. "
             f"T0={self.t0}, pre_s={self.pre_s}, post_s={self.post_s}, "
             f"binwidth_s={self.binwidth_s}"
         )
@@ -137,13 +187,14 @@ class BsplineBasis(BasisFunction):
 
 class CustomBasisFunction(BasisFunction):
     def __init__(self, basis_array, pre_s, post_s, binwidth_s):
-        self.basis = basis_array
-        self.pre_s = pre_s
-        self.post_s = post_s
-        self.binwidth_s = binwidth_s
-        self.basis_time, _, self.t0 = construct_timebins(
-            self.pre_s, self.post_s, binwidth_s
+        self._basis_array = np.asarray(basis_array)
+        super().__init__(pre_s=pre_s, post_s=post_s, binwidth_s=binwidth_s)
+
+    def construct_basis(self):
+        basis_time, _, _ = construct_timebins(
+            self.pre_s, self.post_s, self.binwidth_s
         )
+        return self._basis_array, basis_time
 
 
 basis_function_classes = {
